@@ -1,0 +1,19 @@
+# Substrate worker pool for Moyai sandboxes (gVisor). Moyai's ActorTemplate selects
+# workload=moyai and limits each actor to 2 CPU / 4Gi.
+apiVersion: v1
+kind: Namespace
+metadata: {name: moyai}
+---
+apiVersion: ate.dev/v1alpha1
+kind: WorkerPool
+metadata:
+  name: moyai-workerpool
+  namespace: moyai
+  labels: {workload: moyai}
+spec:
+  replicas: 2
+  workerImage: us-east1-docker.pkg.dev/project-287c53a0-e18a-40e8-824/moyai/ate/ateom-gvisor@sha256:e75a047c960cb1f2eed7086c253514c2b48e8dbb931e28052844abcc9e77e580
+  template:
+    resources:
+      limits: {cpu: "2", memory: 5Gi}
+      requests: {cpu: 500m, memory: 5Gi}

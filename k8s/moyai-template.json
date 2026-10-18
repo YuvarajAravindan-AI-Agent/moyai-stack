@@ -1,0 +1,75 @@
+{
+  "metadata": {
+    "atespace": "moyai",
+    "name": "moyai"
+  },
+  "workerSelector": {
+    "matchLabels": {
+      "workload": "moyai"
+    }
+  },
+  "containers": [
+    {
+      "name": "workspace",
+      "image": "us-east1-docker.pkg.dev/project-287c53a0-e18a-40e8-824/moyai/moyai-sandbox@sha256:ea24e02dbe85527ff156a96b2575be504e2528578e9c43575fe8ece55c059390",
+      "env": [
+        {
+          "name": "MOYAI_SUBSTRATE_PUBLIC_KEY",
+          "value": "szgz1HLED5QuaNXNMWWyiqijXeYxKYsR99WXtboo7PI="
+        }
+      ],
+      "volumeMounts": [
+        {
+          "name": "identity",
+          "mountPath": "/run/moyai"
+        }
+      ],
+      "wakeupProbe": {
+        "httpGet": {
+          "path": "/health",
+          "port": 80
+        }
+      }
+    }
+  ],
+  "volumes": [
+    {
+      "name": "identity",
+      "systemInfo": {
+        "dataSources": [
+          {
+            "actorMetadata": {
+              "items": [
+                {
+                  "field": "ACTOR_METADATA_FIELD_UID",
+                  "path": "uid"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "resources": {
+    "limits": [
+      {
+        "name": "cpu",
+        "quantity": "2"
+      },
+      {
+        "name": "memory",
+        "quantity": "4Gi"
+      }
+    ]
+  },
+  "snapshotConfig": {
+    "storageLocation": "gs://moyai-substrate-snapshots-714593281128/moyai",
+    "onPause": "SNAPSHOT_CONTENT_SCOPE_FULL",
+    "onCommit": "SNAPSHOT_CONTENT_SCOPE_FULL"
+  },
+  "sandboxConfig": {
+    "sandboxClass": "SANDBOX_CLASS_GVISOR",
+    "configName": "gvisor-default"
+  }
+}

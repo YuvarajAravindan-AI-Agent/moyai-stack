@@ -1,0 +1,53 @@
+# Slack app manifest for Moyai (self-hosted at moyai.ai-agentic-enterprises.com).
+# Slack -> api.slack.com/apps -> Create New App -> From a manifest -> pick your workspace -> paste this.
+# Scopes mirror what Moyai's OAuth flow requests (app/connectors.py) with
+# SLACK_BOT_ENABLED, identity linking and thread chat on.
+display_information:
+  name: Moyai
+  description: Coding agent that runs in isolated sandboxes and opens pull requests
+  background_color: "#6b21a8"
+features:
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: false
+  bot_user:
+    display_name: Moyai
+    always_online: true
+oauth_config:
+  redirect_urls:
+    - https://moyai.ai-agentic-enterprises.com/oauth/slack/callback
+  scopes:
+    user:
+      - search:read
+      - channels:history
+      - groups:history
+      - im:history
+      - mpim:history
+    bot:
+      - app_mentions:read
+      - chat:write
+      - im:write
+      - im:history
+      - reactions:write
+      - assistant:write
+      - files:write
+      - files:read
+      - users:read
+      - users:read.email
+      - channels:history
+      - groups:history
+settings:
+  event_subscriptions:
+    request_url: https://moyai.ai-agentic-enterprises.com/hooks/slack/events
+    bot_events:
+      - app_mention
+      - message.channels
+      - message.groups
+      - message.im
+  interactivity:
+    is_enabled: true
+    request_url: https://moyai.ai-agentic-enterprises.com/hooks/slack/interactions
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

@@ -1,0 +1,19 @@
+diff --git a/app/sandboxes/modal.py b/app/sandboxes/modal.py
+index 2852fca..d2a7e3b 100644
+--- a/app/sandboxes/modal.py
++++ b/app/sandboxes/modal.py
+@@ -34,7 +34,13 @@ class ModalProvider:
+             env={'PYTHONUNBUFFERED': '1', 'PYTHONPATH': '/opt/hermes', 'HERMES_HOME': '/tmp/hermes-home',
+                  'HERMES_RUNTIME_DIR': '/opt/hermes-tools', 'HERMES_PYTHON': '/opt/hermes-env/bin/python',
+                  'GIT_TERMINAL_PROMPT': '0'}, timeout=timeout, cpu=2, memory=memory,
+-            experimental_options={'vm_runtime': True} if self.settings.modal_vm_runtime else {})
++            experimental_options={'vm_runtime': True} if self.settings.modal_vm_runtime else {},
++            # Local patch: same outbound hostname allow-list as Substrate; '*' keeps Modal open.
++            **self._egress())
++
++    def _egress(self):
++        hosts = [h.strip() for h in self.settings.substrate_egress_hosts.split(',') if h.strip()]
++        return {} if not hosts or '*' in hosts else {'outbound_domain_allowlist': hosts}
+ 
+     async def check(self):
+         # Authenticate without starting billable compute or building an image.

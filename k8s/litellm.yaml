@@ -1,0 +1,120 @@
+# LiteLLM gateway in GKE. Vertex access via Workload Identity (KSA litellm/litellm
+# holds roles/aiplatform.user directly) - no key file exists anywhere.
+apiVersion: v1
+kind: Namespace
+metadata: {name: litellm}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: litellm, namespace: litellm}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: litellm-config, namespace: litellm}
+data:
+  config.yaml: |
+    model_list:
+      - model_name: gemini-3.8-flash
+        litellm_params:
+          model: vertex_ai/gemini-3.8-flash
+          vertex_project: project-287c53a0-e18a-40e8-824
+          vertex_location: global
+          timeout: 60
+          stream_timeout: 45
+      - model_name: gemini-2.5-flash
+        litellm_params:
+          model: vertex_ai/gemini-2.5-flash
+          vertex_project: project-287c53a0-e18a-40e8-824
+          vertex_location: us-east1
+          timeout: 60
+          stream_timeout: 45
+      - model_name: gemini-2.5-flash
+        litellm_params:
+          model: vertex_ai/gemini-2.5-flash
+          vertex_project: project-287c53a0-e18a-40e8-824
+          vertex_location: global
+          timeout: 60
+          stream_timeout: 45
+      - model_name: gemini-2.5-pro
+        litellm_params:
+          model: vertex_ai/gemini-2.5-pro
+          vertex_project: project-287c53a0-e18a-40e8-824
+          vertex_location: global
+          timeout: 60
+          stream_timeout: 45
+    router_settings:
+      routing_strategy: simple-shuffle
+      num_retries: 3
+      retry_after: 2
+      allowed_fails: 2
+      cooldown_time: 30
+      fallbacks:
+        - gemini-2.5-flash: ["gemini-3.8-flash"]
+    litellm_settings:
+      drop_params: true
+      request_timeout: 90
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      database_url: os.environ/DATABASE_URL
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: litellm-db, namespace: litellm}
+spec:
+  serviceName: litellm-db
+  replicas: 1
+  selector: {matchLabels: {app: litellm-db}}
+  template:
+    metadata: {labels: {app: litellm-db}}
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:17-alpine
+        env:
+        - {name: POSTGRES_DB, value: litellm}
+        - {name: POSTGRES_USER, value: litellm}
+        - {name: POSTGRES_PASSWORD, valueFrom: {secretKeyRef: {name: litellm-secrets, key: db-password}}}
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+        ports: [{containerPort: 5432}]
+        readinessProbe: {exec: {command: [pg_isready, -U, litellm]}, periodSeconds: 10}
+        resources: {requests: {cpu: 50m, memory: 128Mi}, limits: {memory: 512Mi}}
+        volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec: {accessModes: [ReadWriteOnce], resources: {requests: {storage: 5Gi}}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: litellm-db, namespace: litellm}
+spec: {selector: {app: litellm-db}, ports: [{port: 5432}]}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: litellm, namespace: litellm}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: litellm}}
+  template:
+    metadata: {labels: {app: litellm}}
+    spec:
+      serviceAccountName: litellm
+      containers:
+      - name: litellm
+        image: ghcr.io/berriai/litellm:v1.104.2
+        args: [--config, /app/config.yaml, --port, "4000"]
+        env:
+        - {name: LITELLM_MASTER_KEY, valueFrom: {secretKeyRef: {name: litellm-secrets, key: master-key}}}
+        - {name: LITELLM_SALT_KEY, valueFrom: {secretKeyRef: {name: litellm-secrets, key: salt-key}}}
+        - {name: DB_PASSWORD, valueFrom: {secretKeyRef: {name: litellm-secrets, key: db-password}}}
+        - {name: DATABASE_URL, value: "postgresql://litellm:$(DB_PASSWORD)@litellm-db:5432/litellm"}
+        - {name: STORE_MODEL_IN_DB, value: "False"}
+        ports: [{containerPort: 4000}]
+        readinessProbe: {httpGet: {path: /health/readiness, port: 4000}, periodSeconds: 10, failureThreshold: 30}
+        resources: {requests: {cpu: 200m, memory: 512Mi}, limits: {memory: 1536Mi}}
+        volumeMounts: [{name: config, mountPath: /app/config.yaml, subPath: config.yaml}]
+      volumes: [{name: config, configMap: {name: litellm-config}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: litellm, namespace: litellm}
+spec: {selector: {app: litellm}, ports: [{port: 4000}]}

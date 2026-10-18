@@ -1,0 +1,27 @@
+apiVersion: install.ate.dev/v1alpha1
+atenet:
+  egress:
+    credentialProvider: '{"enabled":false}'
+cluster:
+  context: gke_project-287c53a0-e18a-40e8-824_us-east1-b_moyai-substrate
+  failedAt: ate-setup deploy ate-system
+  outcome: failed
+  writtenAt: "2026-10-08T15:29:54Z"
+  writtenBy: ate-setup dev commit=unknown built=unknown linux/amd64
+context: gke_project-287c53a0-e18a-40e8-824_us-east1-b_moyai-substrate
+csi:
+  setup: none
+gcp:
+  clusterLocation: us-east1-b
+  clusterName: moyai-substrate
+  projectID: project-287c53a0-e18a-40e8-824
+kind: SubstrateInstall
+ko:
+  defaultPlatforms: linux/amd64
+  dockerRepo: us-east1-docker.pkg.dev/project-287c53a0-e18a-40e8-824/moyai/ate
+kubeconfig: /home/yuvaraj/.kube/moyai-substrate.yaml
+record:
+  dir: /home/yuvaraj/Projects/moyai-stack/substrate-installs
+rolloutTimeout: 10m
+storage:
+  bucketName: moyai-substrate-snapshots-714593281128
