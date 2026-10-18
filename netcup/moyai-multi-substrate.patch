@@ -1,0 +1,271 @@
+diff --git a/app/config.py b/app/config.py
+index 7710f33..782f9a5 100644
+--- a/app/config.py
++++ b/app/config.py
+@@ -7,6 +7,8 @@ from pydantic import Field, field_validator, model_validator
+ from pydantic_settings import BaseSettings, SettingsConfigDict
+ from .context_budget import ModelContextLimits
+ 
++CLUSTER_KEYS = {'api_url', 'router_url', 'api_token', 'token_file', 'ca_cert', 'atespace', 'template', 'egress_hosts'}
++
+ 
+ # Keep picker IDs and labels in code so a stale deployment environment cannot
+ # hide models added by a release. AGENT_MODEL only chooses the default.
+@@ -82,7 +84,7 @@ class Settings(BaseSettings):
+     braintrust_parent: str = "project_name:moyai"
+     agent_model: str = ""
+     agent_harness: str = 'claude-agent-sdk'
+-    sandbox_provider: Literal['modal', 'substrate'] = 'modal'
++    sandbox_provider: str = 'modal'
+     substrate_api_url: str = ''
+     substrate_router_url: str = ''
+     substrate_api_token: str = ''
+@@ -92,6 +94,10 @@ class Settings(BaseSettings):
+     substrate_template: str = 'moyai'
+     substrate_signing_key: str = ''
+     substrate_egress_hosts: str = '*'
++    # Local patch: extra Substrate clusters as JSON, {"eks": {"api_url": ..., "router_url": ...,
++    # "token_file" or "api_token", "ca_cert", "atespace", "template", "egress_hosts"}}. Each one is
++    # the sandbox provider 'substrate-<name>'; unset keys inherit the primary cluster's values.
++    substrate_clusters: str = ''
+     modal_token_id: str = ""
+     modal_token_secret: str = ""
+     modal_app_name: str = "hermes-workspace"
+@@ -140,6 +146,40 @@ class Settings(BaseSettings):
+     notion_client_id: str = ""
+     notion_client_secret: str = ""
+ 
++    @model_validator(mode='after')
++    def known_sandbox_provider(self):
++        if self.sandbox_provider not in self.sandbox_provider_names():
++            raise ValueError('Choose modal, substrate, or a cluster named in SUBSTRATE_CLUSTERS.')
++        for name in self.cluster_specs():
++            self.substrate_cluster('substrate-' + name)
++        return self
++
++    def cluster_specs(self) -> dict:
++        import json
++        specs = json.loads(self.substrate_clusters) if self.substrate_clusters.strip() else {}
++        if not isinstance(specs, dict) or any(not re.fullmatch(r'[a-z0-9]{1,20}', name) or not isinstance(spec, dict)
++                                              or set(spec) - CLUSTER_KEYS for name, spec in specs.items()):
++            raise ValueError('SUBSTRATE_CLUSTERS maps short lowercase names to cluster connection objects.')
++        return specs
++
++    def sandbox_provider_names(self) -> list[str]:
++        return ['modal', 'substrate'] + ['substrate-' + name for name in self.cluster_specs()]
++
++    def substrate_cluster(self, provider: str):
++        """Settings for one Substrate cluster: the primary one, or an extra SUBSTRATE_CLUSTERS entry."""
++        if provider == 'substrate':
++            return self
++        spec = self.cluster_specs().get(provider.removeprefix('substrate-')) if provider.startswith('substrate-') else None
++        if spec is None:
++            raise ValueError('Unknown Substrate cluster')
++        values = {**self.model_dump(), **{'substrate_' + key: value for key, value in spec.items()},
++                  'sandbox_provider': 'substrate', 'substrate_clusters': ''}
++        if spec.get('api_token'):
++            values['substrate_token_file'] = spec.get('token_file', '')
++        elif spec.get('token_file'):
++            values['substrate_api_token'] = ''
++        return type(self)(_env_file=None, **values)
++
+     @model_validator(mode='after')
+     def object_storage_credentials(self):
+         if bool(self.object_storage_access_key_id) != bool(self.object_storage_secret_access_key):
+@@ -353,6 +393,12 @@ class Settings(BaseSettings):
+         return ','.join(hosts)
+ 
+     def missing_sandbox(self, provider=None) -> list[str]:
++        provider = provider or self.sandbox_provider
++        if provider.startswith('substrate-'):
++            try:
++                return self.substrate_cluster(provider).missing_sandbox('substrate')
++            except ValueError:
++                return ['SUBSTRATE_CLUSTERS']
+         required = ({'MODAL_TOKEN_ID': self.modal_token_id, 'MODAL_TOKEN_SECRET': self.modal_token_secret}
+                     if (provider or self.sandbox_provider) == 'modal' else {
+                         'SUBSTRATE_API_URL': self.substrate_api_url, 'SUBSTRATE_ROUTER_URL': self.substrate_router_url,
+diff --git a/app/sandbox_settings.py b/app/sandbox_settings.py
+index 2ff8c1c..6bdf05d 100644
+--- a/app/sandbox_settings.py
++++ b/app/sandbox_settings.py
+@@ -60,6 +60,9 @@ class SandboxSettings:
+         result = {'provider': self.settings.sandbox_provider,
+                   'revision': self.store.rows('SELECT revision FROM sandbox_settings WHERE id=1')[0]['revision'],
+                   'providers': {name: {'configured': not self.settings.missing_sandbox(name)} for name in FIELDS}}
++        # Local patch: extra clusters come from SUBSTRATE_CLUSTERS and are not editable on this page.
++        extra = [name for name in self.settings.sandbox_provider_names() if name not in FIELDS]
++        result['providers'].update({name: {'configured': not self.settings.missing_sandbox(name), 'managed_by_env': True} for name in extra})
+         if admin:
+             from sandbox.substrate_protocol import private_key
+             result['public_key'] = base64.b64encode(private_key(self.settings.substrate_signing_key).public_key().public_bytes_raw()).decode()
+diff --git a/app/sandboxes/__init__.py b/app/sandboxes/__init__.py
+index f0bc63d..1dc7ff9 100644
+--- a/app/sandboxes/__init__.py
++++ b/app/sandboxes/__init__.py
+@@ -6,11 +6,14 @@ def provider(settings, name=None, *, modal_clients=None):
+     name = name or settings.sandbox_provider
+     if name == 'modal':
+         return ModalProvider(settings, modal_clients)
+-    if name == 'substrate':
++    if name == 'substrate' or name.startswith('substrate-'):
++        # Local patch: 'substrate-<name>' selects an extra cluster from SUBSTRATE_CLUSTERS.
+         from .substrate import SubstrateProvider
+-        return SubstrateProvider(settings)
++        return SubstrateProvider(settings.substrate_cluster(name), name)
+     raise ValueError('Unknown sandbox provider')
+ 
+ 
+ def provider_for_id(identity):
+-    return 'substrate' if identity.startswith('substrate:') else 'modal'
++    # Sandbox and snapshot IDs start with their provider name: 'substrate:…' or 'substrate-eks:…'.
++    kind = identity.split(':', 1)[0]
++    return kind if ':' in identity and (kind == 'substrate' or kind.startswith('substrate-')) else 'modal'
+diff --git a/app/sandboxes/substrate.py b/app/sandboxes/substrate.py
+index 49fabd4..4f1c7b5 100644
+--- a/app/sandboxes/substrate.py
++++ b/app/sandboxes/substrate.py
+@@ -47,10 +47,9 @@ def tls_context(settings):
+ 
+ 
+ class SubstrateProvider:
+-    name = 'substrate'
+-
+-    def __init__(self, settings):
+-        self.settings = settings
++    def __init__(self, settings, name='substrate'):
++        # name is also the prefix of this cluster's sandbox and snapshot IDs.
++        self.settings, self.name = settings, name
+ 
+     async def rpc(self, method, data, timeout=120):
+         url = urlsplit(self.settings.substrate_api_url)
+@@ -79,8 +78,8 @@ class SubstrateProvider:
+ 
+     async def get(self, identity):
+         kind, space, name, uid = identity.split(':')
+-        if kind != 'substrate':
+-            raise ValueError('Invalid Substrate sandbox ID')
++        if kind != self.name:
++            raise ValueError('Sandbox ID belongs to another Substrate cluster')
+         actor = await self.rpc('GetActor', {'actor': ref(space, name)})
+         if actor.metadata.uid != uid:
+             raise NotFoundError('Substrate actor was replaced')
+@@ -117,7 +116,7 @@ class SubstrateProvider:
+         actor_data = {'metadata': ref(space, name or 'moyai-' + uuid4().hex), 'actor_template': ref(space, template)}
+         if snapshot_id:
+             kind, tag_space, template, tag = snapshot_id.split(':')
+-            if kind != 'substrate' or tag_space != space:
++            if kind != self.name or tag_space != space:
+                 raise ValueError('Snapshot belongs to another sandbox provider or Substrate atespace')
+             actor_data.update(actor_template=ref(space, template), source_tag=ref(space, tag))
+         owned = True
+@@ -161,7 +160,7 @@ class Sandbox:
+     def __init__(self, provider, actor, token=''):
+         self.provider, self.actor = provider, actor
+         self.ref = ref(actor.metadata.atespace, actor.metadata.name)
+-        self.object_id = ':'.join(('substrate', actor.metadata.atespace, actor.metadata.name, actor.metadata.uid))
++        self.object_id = ':'.join((provider.name, actor.metadata.atespace, actor.metadata.name, actor.metadata.uid))
+         self.lock = _ACTOR_LOCKS.setdefault(self.object_id, asyncio.Lock())
+         self.env = {'WORKSPACE_RUN_TOKEN': token} if token else {}
+         self.filesystem = Filesystem(self)
+@@ -254,7 +253,7 @@ class Sandbox:
+             finally:
+                 await self.provider.rpc('ResumeActor', {'actor': self.ref}, timeout=timeout)
+                 await self._request('/activate', {})
+-        return SimpleNamespace(object_id=':'.join(('substrate', self.ref['atespace'], self.actor.actor_template.name, tag)))
++        return SimpleNamespace(object_id=':'.join((self.provider.name, self.ref['atespace'], self.actor.actor_template.name, tag)))
+ 
+ 
+ class Filesystem:
+diff --git a/app/static/sandbox-settings.js b/app/static/sandbox-settings.js
+index d145877..2f0d709 100644
+--- a/app/static/sandbox-settings.js
++++ b/app/static/sandbox-settings.js
+@@ -20,6 +20,11 @@ async function renderSandboxConnection(version) {
+     };
+     const drafts = Object.fromEntries(Object.entries(saved.providers).map(([name, value]) => [name, {...value.values}]));
+     let selected = saved.provider;
++    // Local patch: an extra cluster from SUBSTRATE_CLUSTERS is configured in moyai.env, not on this page.
++    if (!fields[selected]) {
++      host.innerHTML = `<h2>Sandbox provider</h2><p>New sessions run on the Substrate cluster <strong>${esc(selected)}</strong>, set by SANDBOX_PROVIDER and SUBSTRATE_CLUSTERS in the server environment. Existing sessions keep their original cluster.</p>`;
++      return;
++    }
+     host.innerHTML = `<h2>Sandbox provider</h2><p class="subtext">Choose where new sessions run. Existing sessions keep their original provider.</p>
+       <form id="sandbox-connection-form"><div class="field"><label for="sandbox-provider">Provider</label><select id="sandbox-provider"><option value="modal">Modal</option><option value="substrate">Substrate</option></select></div>
+       <div id="sandbox-connection-fields"></div><p id="sandbox-connection-status" role="status"></p>
+diff --git a/tests/test_sandbox_providers.py b/tests/test_sandbox_providers.py
+index 0c43e00..114c5ee 100644
+--- a/tests/test_sandbox_providers.py
++++ b/tests/test_sandbox_providers.py
+@@ -488,3 +488,71 @@ def test_busy_computer_aborts_freeze_before_stopping_processes(monkeypatch):
+     with pytest.raises(RuntimeError, match='Computer action is still running'):
+         guest.freeze()
+     assert not calls and not guest.COMPUTER_FREEZING
++
++
++def eks_settings(tmp_path, **extra):
++    _, signing = key()
++    clusters = json.dumps({'eks': {'api_url': 'https://eks-api.example.com', 'router_url': 'https://eks-router.example.com',
++                                   'token_file': '/run/eks-token', 'atespace': 'moyai-aws', 'egress_hosts': 'github.com'}})
++    return Settings(_env_file=None, data_dir=tmp_path, substrate_api_url='https://api.example.com',
++                    substrate_router_url='https://router.example.com', substrate_api_token='gke-token',
++                    substrate_signing_key=signing, substrate_clusters=clusters, **extra)
++
++
++def test_extra_substrate_cluster_inherits_primary_and_overrides_its_endpoints(tmp_path):
++    from app.sandboxes import provider, provider_for_id
++    settings = eks_settings(tmp_path, sandbox_provider='substrate-eks')
++    assert settings.sandbox_provider_names() == ['modal', 'substrate', 'substrate-eks']
++    assert settings.missing_sandbox() == []
++    eks = provider(settings, 'substrate-eks')
++    assert eks.name == 'substrate-eks'
++    assert (eks.settings.substrate_api_url, eks.settings.substrate_atespace) == ('https://eks-api.example.com', 'moyai-aws')
++    assert (eks.settings.substrate_api_token, eks.settings.substrate_token_file) == ('', '/run/eks-token')
++    assert eks.settings.substrate_signing_key == settings.substrate_signing_key
++    assert eks.settings.substrate_template == 'moyai'
++    assert provider(settings, 'substrate').settings.substrate_api_url == 'https://api.example.com'
++    assert provider_for_id('substrate-eks:moyai-aws:one:uid') == 'substrate-eks'
++    assert provider_for_id('substrate:moyai:one:uid') == 'substrate'
++    assert provider_for_id('sb-modal123') == 'modal'
++
++
++@pytest.mark.parametrize('clusters', ['[]', '{"EKS": {}}', '{"eks": {"region": "us-east-1"}}', '{"eks": {"api_url": "http://x.example.com"}}'])
++def test_invalid_extra_clusters_are_rejected(tmp_path, clusters):
++    with pytest.raises(ValueError):
++        Settings(_env_file=None, data_dir=tmp_path, substrate_clusters=clusters)
++
++
++def test_unknown_default_provider_is_rejected(tmp_path):
++    with pytest.raises(ValueError):
++        Settings(_env_file=None, data_dir=tmp_path, sandbox_provider='substrate-eks')
++
++
++async def test_sandbox_and_snapshot_ids_carry_their_cluster(tmp_path):
++    from app.sandboxes import provider
++    settings = eks_settings(tmp_path)
++    eks, gke = provider(settings, 'substrate-eks'), provider(settings, 'substrate')
++    actor = pb.Actor(metadata={'atespace': 'moyai-aws', 'name': 'one', 'uid': 'actor-one'}, actor_template={'name': 'moyai'})
++    sandbox = Sandbox(eks, actor)
++    assert sandbox.object_id == 'substrate-eks:moyai-aws:one:actor-one'
++    with pytest.raises(ValueError, match='another Substrate cluster'):
++        await gke.get(sandbox.object_id)
++    eks.rpc = AsyncMock(return_value=actor)
++    assert (await eks.get(sandbox.object_id)).object_id == sandbox.object_id
++    sandbox._request = AsyncMock()
++    eks.rpc.reset_mock()
++    snapshot = await sandbox.snapshot_filesystem.aio()
++    assert snapshot.object_id.startswith('substrate-eks:moyai-aws:moyai:moyai-')
++    with pytest.raises(ValueError, match='another sandbox provider'):
++        await gke.create(snapshot_id=snapshot.object_id)
++
++
++def test_sessions_stay_on_their_cluster_after_default_switch(tmp_path):
++    settings = eks_settings(tmp_path, sandbox_provider='substrate')
++    store = Store(tmp_path)
++    manager = RunManager(store, settings)
++    old = store.create_run('On GKE', '', 'modal', [])
++    settings.sandbox_provider = 'substrate-eks'
++    new = store.create_run('On EKS', '', 'modal', [])
++    assert manager.provider(old).name == 'substrate'
++    assert manager.provider(new).name == 'substrate-eks'
++    assert manager.provider(identity='substrate-eks:moyai-aws:one:uid').settings.substrate_atespace == 'moyai-aws'

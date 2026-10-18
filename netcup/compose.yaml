@@ -1,0 +1,29 @@
+name: moyai-stack
+services:
+  moyai:
+    build: ./moyai
+    init: true
+    env_file: ./moyai.env
+    environment: {DATA_DIR: /data}
+    ports: ["127.0.0.1:8797:8787"]
+    volumes:
+      - moyai-data:/data
+      - ./substrate-token:/run/substrate-token:ro
+    restart: unless-stopped
+    stop_grace_period: 90s
+  gca-relay:
+    build: ./moyai
+    init: true
+    env_file: ./moyai.env
+    environment: {DATA_DIR: /data, PYTHONPATH: /app}
+    working_dir: /app
+    entrypoint: ["/app/.venv/bin/python", "/relay/gca_relay.py"]
+    ports: ["127.0.0.1:8798:8798"]
+    volumes:
+      - ./gca-relay:/relay:ro
+      - ./substrate-token:/run/substrate-token:ro
+      - ./gca-relay-token:/run/gca-relay-token:ro
+    healthcheck: {disable: true}
+    restart: unless-stopped
+volumes:
+  moyai-data:
